@@ -31,6 +31,10 @@
 #include "ext/standard/file.h"
 #include "ext/standard/php_string.h"
 
+#ifndef ENFORCE_SAFE_MODE
+# define ENFORCE_SAFE_MODE 1
+#endif
+
 #if !defined(HAVE_STRTOK_R) || !defined(strtok_r)
 # define strtok_r php_strtok_r
 #endif
@@ -145,10 +149,16 @@ static int value_hnd(char *name, char *value, int flag, int mode, HashTable *ini
 		}
 	}
 #endif
+
 #if PHP_VERSION_ID < 50204
 	if (zend_alter_ini_entry(name, name_len + 1, value, value_len, mode, PHP_INI_STAGE_RUNTIME) == FAILURE) {
-#else
+#elif PHP_VERSION_ID < 70000
 	if (zend_alter_ini_entry(name, name_len + 1, value, value_len, mode, PHP_INI_STAGE_HTACCESS) == FAILURE) {
+#else
+        zend_string *zname, *zvalue;
+        zname = zend_string_init(name, name_len, 0);
+        zvalue = zend_string_init(value, value_len, 0);
+	if (zend_alter_ini_entry(zname, zvalue, mode, PHP_INI_STAGE_HTACCESS) == FAILURE) {
 #endif
 		htscanner_debug("zend_alter_ini_entry failed!");
 		if (HTG(verbose)) {
@@ -158,7 +168,11 @@ static int value_hnd(char *name, char *value, int flag, int mode, HashTable *ini
 	}
 
 	if (ini_entries)
+#if PHP_VERSION_ID < 70000
 		zend_hash_update(ini_entries, name, name_len + 1, value, value_len + 1, NULL);
+#else
+		zend_hash_update(ini_entries, zname, (zval *) zvalue);
+#endif
 
 	return SUCCESS;
 }
@@ -259,7 +273,7 @@ ZEND_GET_MODULE(htscanner)
 PHP_INI_BEGIN()
 	STD_PHP_INI_ENTRY("htscanner.config_file", ".htaccess", PHP_INI_SYSTEM, OnUpdateString, config_file, zend_htscanner_globals, htscanner_globals)
 	STD_PHP_INI_ENTRY("htscanner.default_docroot", "/", PHP_INI_SYSTEM, OnUpdateString, default_docroot, zend_htscanner_globals, htscanner_globals)
-#if (PHP_MAJOR_VERSION == 5 && PHP_MINOR_VERSION > 0)
+#if (PHP_VERSION_ID >= 70000 || PHP_MAJOR_VERSION == 5 && PHP_MINOR_VERSION > 0)
 	STD_PHP_INI_ENTRY("htscanner.default_ttl", "300", PHP_INI_SYSTEM, OnUpdateLong, default_ttl, zend_htscanner_globals, htscanner_globals)
 	STD_PHP_INI_ENTRY("htscanner.stop_on_error", "0", PHP_INI_SYSTEM, OnUpdateLong, stop_on_error, zend_htscanner_globals, htscanner_globals)
 	STD_PHP_INI_ENTRY("htscanner.verbose", "0", PHP_INI_SYSTEM, OnUpdateLong, verbose, zend_htscanner_globals, htscanner_globals)
@@ -350,23 +364,39 @@ static int htscanner_main(TSRMLS_D) /* {{{ */
 #endif
 
 	htscannerMutexLock(ini_entries_cache_mutex);
+#if PHP_VERSION_ID < 70000
 	if (zend_hash_find(ini_entries_cache, cwd, cwd_len, (void**)&entry_fetched) == SUCCESS) {
+#else
+        zval *zv;
+	if ((zv = zend_hash_str_find(ini_entries_cache, cwd, sizeof(cwd)-1)) != NULL) {
+            convert_to_object_ex(zv);
+            entry_fetched = (htscanner_cache_entry *) Z_OBJ_P(zv); //(htscanner_cache_entry *) zv->value;
+#endif
 		/* fetch cache and assign */
 		if ((unsigned int)(t - entry_fetched->created_on) < HTG(default_ttl)) {
-			char *value, *name;
 			HashPosition pos;
 			uint len;
 			ulong num;
 
 			zend_hash_internal_pointer_reset_ex(entry_fetched->ini_entries, &pos);
 
+#if PHP_VERSION_ID < 70000
+			char *value, *name;
 			while (SUCCESS == zend_hash_get_current_data_ex(entry_fetched->ini_entries, (void**)&value, &pos)) {
 				zend_hash_get_current_key_ex(entry_fetched->ini_entries, &name, &len, &num, 0, &pos);
+#else
+                        zval *value;
+                        zend_string *name;
+			while (value = zend_hash_get_current_data_ex(entry_fetched->ini_entries, &pos)) {
+				zend_hash_get_current_key_ex(entry_fetched->ini_entries, &name, (zend_ulong*) &num, &pos);
+#endif
 				htscanner_debug("setting: %s = %s (cache hit)", name, value);
 #if PHP_VERSION_ID < 50204
 				if (zend_alter_ini_entry(name, len, value, strlen(value), PHP_INI_PERDIR, PHP_INI_STAGE_PHP_INI_STAGE_RUNTIME) == FAILURE) {
-#else
+#elif PHP_VERSION_ID < 70000
 				if (zend_alter_ini_entry(name, len, value, strlen(value), PHP_INI_PERDIR, PHP_INI_STAGE_HTACCESS) == FAILURE) {
+#else
+				if (zend_alter_ini_entry(name, zval_get_string(value), PHP_INI_PERDIR, PHP_INI_STAGE_HTACCESS) == FAILURE) {
 #endif
 					char msg[1024];
 					snprintf(msg, sizeof (msg), "Adding option from cache (Name: '%s' Value: '%s') failed!\n", name, value);
@@ -409,7 +439,11 @@ static int htscanner_main(TSRMLS_D) /* {{{ */
 	}
 
 	if (ini_entries)
+#if PHP_VERSION_ID < 70000
 		zend_hash_update(ini_entries_cache, cwd, cwd_len, &entry, sizeof(htscanner_cache_entry), NULL);
+#else
+		zend_hash_update(ini_entries_cache, (zend_string*) cwd, (zval*) &entry);
+#endif
 	htscannerMutexUnlock(ini_entries_cache_mutex);
 
 	return SUCCESS;
